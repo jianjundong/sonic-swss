@@ -24,6 +24,7 @@ struct tunnel_ids_t
     sai_object_id_t tunnel_decap_id;
     sai_object_id_t tunnel_id;
     sai_object_id_t tunnel_term_id;
+    sai_object_id_t tunnel_bridge_port_id;
 };
 
 class VxlanTunnel
@@ -56,6 +57,21 @@ public:
         return ids_.tunnel_encap_id;
     }
 
+    sai_object_id_t getBridgePortId() const
+    {
+        return ids_.tunnel_bridge_port_id;
+    }
+
+    IpAddress getSrcIp() const
+    {
+        return src_ip_;
+    }
+
+    IpAddress getDstIp() const
+    {
+        return dst_ip_;
+    }
+    
 private:
     string tunnel_name_;
     bool active_ = false;

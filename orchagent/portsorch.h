@@ -117,6 +117,7 @@ private:
     map<set<int>, sai_object_id_t> m_portListLaneMap;
     map<set<int>, tuple<string, uint32_t, int, string>> m_lanesAliasSpeedMap;
     map<string, Port> m_portList;
+    map<string, string> m_portSetLearnModeList;
 
     unordered_set<string> m_pendingPortSet;
 
@@ -128,6 +129,7 @@ private:
     void doVlanMemberTask(Consumer &consumer);
     void doLagTask(Consumer &consumer);
     void doLagMemberTask(Consumer &consumer);
+    void doVxlanTunnelTask(Consumer &consumer);
 
     void doTask(NotificationConsumer &consumer);
 
@@ -143,6 +145,8 @@ private:
 
     bool addBridgePort(Port &port);
     bool removeBridgePort(Port &port);
+    bool setBridgePortLearnMode(Port &port, int32_t mode);
+    bool setTunnelBridgePortLearnMode(sai_object_id_t bridge_port_id, int32_t mode);
 
     bool addVlan(string vlan);
     bool removeVlan(Port vlan);

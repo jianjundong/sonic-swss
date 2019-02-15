@@ -64,7 +64,8 @@ bool OrchDaemon::init()
         { APP_VLAN_TABLE_NAME,        portsorch_base_pri + 2 },
         { APP_VLAN_MEMBER_TABLE_NAME, portsorch_base_pri     },
         { APP_LAG_TABLE_NAME,         portsorch_base_pri + 4 },
-        { APP_LAG_MEMBER_TABLE_NAME,  portsorch_base_pri     }
+        { APP_LAG_MEMBER_TABLE_NAME,  portsorch_base_pri     },
+        { APP_VXLAN_TUNNEL_TABLE_NAME,  portsorch_base_pri + 3 },
     };
 
     gCrmOrch = new CrmOrch(m_configDb, CFG_CRM_TABLE_NAME);
@@ -86,7 +87,7 @@ bool OrchDaemon::init()
 
     gIntfsOrch = new IntfsOrch(m_applDb, APP_INTF_TABLE_NAME, vrf_orch);
     gNeighOrch = new NeighOrch(m_applDb, APP_NEIGH_TABLE_NAME, gIntfsOrch);
-    gRouteOrch = new RouteOrch(m_applDb, APP_ROUTE_TABLE_NAME, gNeighOrch);
+    gRouteOrch = new RouteOrch(m_applDb, APP_ROUTE_TABLE_NAME, gNeighOrch, gIntfsOrch);
     CoppOrch  *copp_orch  = new CoppOrch(m_applDb, APP_COPP_TABLE_NAME);
     TunnelDecapOrch *tunnel_decap_orch = new TunnelDecapOrch(m_applDb, APP_TUNNEL_DECAP_TABLE_NAME);
 

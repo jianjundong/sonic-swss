@@ -22,6 +22,8 @@
 #include "crmorch.h"
 #include "countercheckorch.h"
 #include "notifier.h"
+#include "directory.h"
+#include "vxlanorch.h"
 
 extern sai_switch_api_t *sai_switch_api;
 extern sai_bridge_api_t *sai_bridge_api;
@@ -36,6 +38,7 @@ extern IntfsOrch *gIntfsOrch;
 extern NeighOrch *gNeighOrch;
 extern CrmOrch *gCrmOrch;
 extern BufferOrch *gBufferOrch;
+extern Directory<Orch*> gDirectory;
 
 #define VLAN_PREFIX         "Vlan"
 #define DEFAULT_VLAN_ID     1
@@ -481,12 +484,12 @@ bool PortsOrch::getAclBindPortId(string alias, sai_object_id_t &port_id)
         switch (port.m_type)
         {
         case Port::PHY:
-            if (port.m_lag_member_id != SAI_NULL_OBJECT_ID)
+            /*if (port.m_lag_member_id != SAI_NULL_OBJECT_ID)
             {
                 SWSS_LOG_WARN("Invalid configuration. Bind table to LAG member %s is not allowed", alias.c_str());
                 return false;
             }
-            else
+            else*/
             {
                 port_id = port.m_port_id;
             }
@@ -1480,6 +1483,7 @@ void PortsOrch::doPortTask(Consumer &consumer)
             string pfc_asym;
             uint32_t mtu = 0;
             uint32_t speed = 0;
+            string learn_mode;
             int an = -1;
 
             for (auto i : kfvFieldsValues(t))
@@ -1522,6 +1526,12 @@ void PortsOrch::doPortTask(Consumer &consumer)
                     fec_mode = fvValue(i);
                 }
 
+                /* Get port fdb learn mode*/
+                if (fvField(i) == "learn_mode")
+                {
+                    learn_mode = fvValue(i);
+                }
+                
                 /* Set port asymmetric PFC */
                 if (fvField(i) == "pfc_asym")
                     pfc_asym = fvValue(i);
@@ -1811,7 +1821,48 @@ void PortsOrch::doPortTask(Consumer &consumer)
                         SWSS_LOG_ERROR("Unknown fec mode %s", fec_mode.c_str());
                     }
                 }
+ 
+                if (learn_mode != "")
+                {
+                    if (learn_mode == "enabled" || learn_mode == "disabled")
+                    {
+                        int32_t mode;
 
+                        if (learn_mode == "enabled")
+                        {
+                            mode = SAI_BRIDGE_PORT_FDB_LEARNING_MODE_HW;
+                        }
+                        else
+                        {
+                            mode = SAI_BRIDGE_PORT_FDB_LEARNING_MODE_DISABLE;
+                        }
+
+                        if (p.m_bridge_port_id != SAI_NULL_OBJECT_ID)
+                        {
+                            if(setBridgePortLearnMode(p, mode))
+                            {
+                                SWSS_LOG_NOTICE("Set port %s learn mode to %s", alias.c_str(), learn_mode.c_str());
+                            }
+                            else
+                            {
+                                SWSS_LOG_ERROR("Failed to set port %s learn mode to %s", alias.c_str(), learn_mode.c_str());
+                                it++;
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            m_portSetLearnModeList[alias] = learn_mode;
+
+                            SWSS_LOG_NOTICE("Saved to set port %s learn mode %s", alias.c_str(), learn_mode.c_str());
+                        }
+                    }
+                    else
+                    {
+                        SWSS_LOG_ERROR("Unknown learn mode %s", learn_mode.c_str());
+                    }
+                }
+                
                 if (pfc_asym != "")
                 {
                     if (setPortPfcAsym(p, pfc_asym))
@@ -2011,7 +2062,38 @@ void PortsOrch::doVlanMemberTask(Consumer &consumer)
             }
 
             if (addBridgePort(port) && addVlanMember(vlan, port, tagging_mode))
+            {
+                int32_t mode;
+                string learning_mode;
+
+                if(m_portSetLearnModeList.find(port_alias) != m_portSetLearnModeList.end())
+                {		
+                    learning_mode = m_portSetLearnModeList[port_alias];
+
+                    SWSS_LOG_NOTICE("Set port %s learn mode %s when add port to vlan %s", port_alias.c_str(), learning_mode.c_str(), vlan_alias.c_str());
+
+                    if (learning_mode == "enabled")
+                    {
+                        mode = SAI_BRIDGE_PORT_FDB_LEARNING_MODE_HW;
+                    }
+                    else if (learning_mode == "disabled")
+                    {
+                        mode = SAI_BRIDGE_PORT_FDB_LEARNING_MODE_DISABLE;
+                    }
+                    else
+                    {
+                        SWSS_LOG_ERROR("Wrong learning_mode '%s' ", learning_mode.c_str());
+                        it = consumer.m_toSync.erase(it);
+                        continue;
+                    }
+
+                    setBridgePortLearnMode(port, mode);
+
+                    m_portSetLearnModeList.erase(port_alias);                    
+                }
+
                 it = consumer.m_toSync.erase(it);
+            }
             else
                 it++;
         }
@@ -2093,6 +2175,57 @@ void PortsOrch::doLagTask(Consumer &consumer)
                     if (l.m_rif_id)
                     {
                         gIntfsOrch->setRouterIntfsMtu(l);
+                    }
+                }
+                
+                string learn_mode;
+                for (auto i : kfvFieldsValues(t))
+                {
+                     /* Get port fdb learn mode*/
+                    if (fvField(i) == "learn_mode")
+                    {
+                        learn_mode = fvValue(i);
+                    }
+                }
+                
+                if (learn_mode != "")
+                {
+                    if (learn_mode == "enabled" || learn_mode == "disabled")
+                    {
+                        int32_t mode;
+
+                        if (learn_mode == "enabled")
+                        {
+                            mode = SAI_BRIDGE_PORT_FDB_LEARNING_MODE_HW;
+                        }
+                        else
+                        {
+                            mode = SAI_BRIDGE_PORT_FDB_LEARNING_MODE_DISABLE;
+                        }
+
+                        if (l.m_bridge_port_id != SAI_NULL_OBJECT_ID)
+                        {
+                            if(setBridgePortLearnMode(l, mode))
+                            {
+                                SWSS_LOG_NOTICE("Set port %s learn mode to %s", alias.c_str(), learn_mode.c_str());
+                            }
+                            else
+                            {
+                                SWSS_LOG_ERROR("Failed to set port %s learn mode to %s", alias.c_str(), learn_mode.c_str());
+                                it++;
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            m_portSetLearnModeList[alias] = learn_mode;
+
+                            SWSS_LOG_NOTICE("Saved to set port %s learn mode %s", alias.c_str(), learn_mode.c_str());
+                        }
+                    }
+                    else
+                    {
+                        SWSS_LOG_ERROR("Unknown learn mode %s", learn_mode.c_str());
                     }
                 }
             }
@@ -2232,6 +2365,93 @@ void PortsOrch::doLagMemberTask(Consumer &consumer)
     }
 }
 
+void PortsOrch::doVxlanTunnelTask(Consumer &consumer)
+{
+    SWSS_LOG_ENTER();
+
+    auto it = consumer.m_toSync.begin();
+    while (it != consumer.m_toSync.end())
+    {
+        auto &t = it->second;
+
+        string alias = kfvKey(t);
+        string op = kfvOp(t);
+
+        if (op == SET_COMMAND)
+        {
+            VxlanTunnelOrch* tunnel_orch = gDirectory.get<VxlanTunnelOrch*>();
+            if (!tunnel_orch->isTunnelExists(alias))
+            {
+                SWSS_LOG_WARN("Vxlan tunnel '%s' doesn't exist", alias.c_str());
+                it++;
+                continue;
+            }
+
+            auto tunnel_obj = tunnel_orch->getVxlanTunnel(alias);
+            sai_object_id_t bridge_port_id = tunnel_obj->getBridgePortId();
+
+            // Process attributes
+            string learn_mode;
+            for (auto i : kfvFieldsValues(t))
+            {
+                 /* Get port fdb learn mode*/
+                if (fvField(i) == "learn_mode")
+                {
+                    learn_mode = fvValue(i);
+                }
+            }
+            
+            if (learn_mode != "")
+            {
+                if (learn_mode == "enabled" || learn_mode == "disabled")
+                {
+                    int32_t mode;
+
+                    if (learn_mode == "enabled")
+                    {
+                        mode = SAI_BRIDGE_PORT_FDB_LEARNING_MODE_HW;
+                    }
+                    else
+                    {
+                        mode = SAI_BRIDGE_PORT_FDB_LEARNING_MODE_DISABLE;
+                    }
+
+                    if (bridge_port_id != SAI_NULL_OBJECT_ID)
+                    {
+                        if(setTunnelBridgePortLearnMode(bridge_port_id, mode))
+                        {
+                            SWSS_LOG_NOTICE("Set port %s learn mode to %s", alias.c_str(), learn_mode.c_str());
+                        }
+                        else
+                        {
+                            SWSS_LOG_ERROR("Failed to set port %s learn mode to %s", alias.c_str(), learn_mode.c_str());
+                            it++;
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        m_portSetLearnModeList[alias] = learn_mode;
+
+                        SWSS_LOG_NOTICE("Saved to set port %s learn mode %s", alias.c_str(), learn_mode.c_str());
+                    }
+                }
+                else
+                {
+                    SWSS_LOG_ERROR("Unknown learn mode %s", learn_mode.c_str());
+                }
+            }
+
+            it = consumer.m_toSync.erase(it);
+        }
+        else
+        {
+            SWSS_LOG_ERROR("Unknown operation type %s", op.c_str());
+            it = consumer.m_toSync.erase(it);
+        }
+    }
+}
+
 void PortsOrch::doTask(Consumer &consumer)
 {
     SWSS_LOG_ENTER();
@@ -2265,6 +2485,10 @@ void PortsOrch::doTask(Consumer &consumer)
         else if (table_name == APP_LAG_MEMBER_TABLE_NAME)
         {
             doLagMemberTask(consumer);
+        }
+        else if (table_name == APP_VXLAN_TUNNEL_TABLE_NAME)
+        {
+            doVxlanTunnelTask(consumer);
         }
     }
 }
@@ -2566,6 +2790,57 @@ bool PortsOrch::removeBridgePort(Port &port)
     return true;
 }
 
+bool PortsOrch::setBridgePortLearnMode(Port &port, int32_t mode)
+{
+    SWSS_LOG_ENTER();
+
+    if (port.m_bridge_port_id == SAI_NULL_OBJECT_ID)
+    {
+        return true;
+    }
+    /* Set bridge port learning mode */
+    sai_attribute_t attr;
+    attr.id = SAI_BRIDGE_PORT_ATTR_FDB_LEARNING_MODE;
+    attr.value.s32 = mode;
+
+    sai_status_t status = sai_bridge_api->set_bridge_port_attribute(port.m_bridge_port_id, &attr);
+    if (status != SAI_STATUS_SUCCESS)
+    {
+        SWSS_LOG_ERROR("Failed to set bridge port %s learning mode, rv:%d",
+            port.m_alias.c_str(), status);
+        return false;
+    }
+
+    SWSS_LOG_NOTICE("Set bridge port %s learning mode", port.m_alias.c_str());
+
+    return true;
+}
+
+bool PortsOrch::setTunnelBridgePortLearnMode(sai_object_id_t bridge_port_id, int32_t mode)
+{
+    SWSS_LOG_ENTER();
+
+    if (bridge_port_id == SAI_NULL_OBJECT_ID)
+    {
+        return true;
+    }
+    /* Set bridge port learning mode */
+    sai_attribute_t attr;
+    attr.id = SAI_BRIDGE_PORT_ATTR_FDB_LEARNING_MODE;
+    attr.value.s32 = mode;
+
+    sai_status_t status = sai_bridge_api->set_bridge_port_attribute(bridge_port_id, &attr);
+    if (status != SAI_STATUS_SUCCESS)
+    {
+        SWSS_LOG_ERROR("Failed to set tunnel bridge port learning mode, rv:%d", status);
+        return false;
+    }
+
+    SWSS_LOG_NOTICE("Set tunnel bridge port learning mode");
+
+    return true;
+}
+
 bool PortsOrch::addVlan(string vlan_alias)
 {
     SWSS_LOG_ENTER();
@@ -2765,6 +3040,12 @@ bool PortsOrch::addLag(string lag_alias)
 
     PortUpdate update = { lag, true };
     notify(SUBJECT_TYPE_PORT_CHANGE, static_cast<void *>(&update));
+	
+    /* Add lag name map to counter table */
+    FieldValueTuple tuple(lag_alias, sai_serialize_object_id(lag_id));
+    vector<FieldValueTuple> fields;
+    fields.push_back(tuple);
+    m_counterTable->set("", fields); 
 
     return true;
 }
@@ -2796,6 +3077,8 @@ bool PortsOrch::removeLag(Port lag)
 
     SWSS_LOG_NOTICE("Remove LAG %s lid:%lx", lag.m_alias.c_str(), lag.m_lag_id);
 
+    m_counterTable->del(lag.m_alias); 
+	
     m_portList.erase(lag.m_alias);
 
     PortUpdate update = { lag, false };
