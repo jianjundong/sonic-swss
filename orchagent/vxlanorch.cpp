@@ -338,7 +338,7 @@ static sai_object_id_t create_tunnel_bridge_port(sai_object_id_t tunnel_oid)
     if (status != SAI_STATUS_SUCCESS)
     {
         SWSS_LOG_ERROR("Failed to get default 1Q bridge, rv:%d", status);
-        throw "PortsOrch initialization failure";
+        throw "VxlanOrch initialization failure";
     }
 
     default1QBridge = attrs_bridge[0].value.oid;
@@ -635,19 +635,22 @@ bool VxlanTunnelMapOrch::addOperation(const Request& request)
     SWSS_LOG_NOTICE("Vxlan tunnel map entry '%s' for tunnel '%s' was created",
                    tunnel_map_entry_name.c_str(), tunnel_name.c_str());
                    
-    //ip link add <tunnel_name> type vxlan id <vni> local <src_ip> remote <dst_ip>  dstport 4789
-    //ip link set <tunnel_name> master DOT1Q_BRIDGE_NAME
-    //bridge vlan add vid <vlan_id> dev <tunnel_name>
+    //ip link add <vxlan_dev_name> type vxlan id <vni> local <src_ip> remote <dst_ip>  dstport 4789
+    //ip link set <vxlan_dev_name> master DOT1Q_BRIDGE_NAME
+    //bridge vlan add vid <vlan_id> dev <vxlan_dev_name>
+    //ip link set <vxlan_dev_name> up
     IpAddress ips, ipd;
+    std::string vxlan_dev_name;
     ips = tunnel_obj->getSrcIp();
     ipd = tunnel_obj->getDstIp();
+    vxlan_dev_name = std::string("") + std::string(tunnel_name) + "-" + std::to_string(vni_id);
     const std::string cmds = std::string("")
       + BASH_CMD + " -c \""
-      + IP_CMD + " link add " + std::string(tunnel_name) + " type vxlan id " + std::to_string(vni_id) 
-      + " local " + ips.to_string().c_str() + " remote " + ipd.to_string().c_str() + " dstport 4789 " + " && "
-      + IP_CMD + " link set " + std::string(tunnel_name) + " master Bridge " + " && "
-      + BRIDGE_CMD + " vlan add vid " + std::to_string(vlan_id) + " dev " + std::string(tunnel_name) + " && "
-      + IP_CMD + " link set " + std::string(tunnel_name) + " up " + "\"";
+      + IP_CMD + " link add " + vxlan_dev_name + " type vxlan id " + std::to_string(vni_id) 
+      + " local " + ips.to_string().c_str() + (ipd.isZero() ? "" : (" remote " + ipd.to_string())) + " dstport 4789 " + " && "
+      + IP_CMD + " link set " + vxlan_dev_name + " master Bridge " + " && "
+      + BRIDGE_CMD + " vlan add vid " + std::to_string(vlan_id) + " dev " + vxlan_dev_name + " && "
+      + IP_CMD + " link set " + vxlan_dev_name + " up " + "\"";
 
     std::string res;
     EXEC_WITH_ERROR_THROW(cmds, res);
