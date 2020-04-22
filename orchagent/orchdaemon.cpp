@@ -5,6 +5,7 @@
 #include "logger.h"
 #include <sairedis.h>
 #include "warm_restart.h"
+#include <chrono>
 
 #define SAI_SWITCH_ATTR_CUSTOM_RANGE_BASE SAI_SWITCH_ATTR_CUSTOM_RANGE_START
 #include "sairedis.h"
@@ -12,6 +13,7 @@
 
 using namespace std;
 using namespace swss;
+using namespace std::chrono;
 
 /* select() function timeout retry time */
 #define SELECT_TIMEOUT 1000
@@ -38,6 +40,16 @@ Directory<Orch*> gDirectory;
 NatOrch *gNatOrch;
 
 bool gIsNatSupported = false;
+steady_clock::time_point g_orchagent_start_time;
+uint32_t g_orchagent_pending_timeout = 70; /*seconds*/
+bool g_get_map_enable;
+
+enum StoreType
+{
+    PORT_MAP,
+    LAG_MAP,
+    QUEUE_MAP,
+};
 
 OrchDaemon::OrchDaemon(DBConnector *applDb, DBConnector *configDb, DBConnector *stateDb) :
         m_applDb(applDb),
@@ -70,6 +82,9 @@ bool OrchDaemon::init()
 {
     SWSS_LOG_ENTER();
 
+    g_orchagent_start_time = steady_clock::now();
+    g_get_map_enable = false;
+
     string platform = getenv("platform") ? getenv("platform") : "";
 
     gSwitchOrch = new SwitchOrch(m_applDb, APP_SWITCH_TABLE_NAME);
@@ -85,7 +100,10 @@ bool OrchDaemon::init()
     };
 
     gCrmOrch = new CrmOrch(m_configDb, CFG_CRM_TABLE_NAME);
-    gPortsOrch = new PortsOrch(m_applDb, ports_tables);
+    TableConnector stateDbPortMap(m_stateDb, STATE_PORT_MAP_TABLE_NAME);
+    TableConnector stateDbLagMap(m_stateDb, STATE_LAG_MAP_TABLE_NAME);
+    TableConnector stateDbQueueMap(m_stateDb, STATE_QUEUE_MAP_TABLE_NAME);
+    gPortsOrch = new PortsOrch(m_applDb, ports_tables, stateDbPortMap, stateDbLagMap, stateDbQueueMap);
     TableConnector applDbFdb(m_applDb, APP_FDB_TABLE_NAME);
     TableConnector stateDbFdb(m_stateDb, STATE_FDB_TABLE_NAME);
     gFdbOrch = new FdbOrch(applDbFdb, stateDbFdb, gPortsOrch);
@@ -166,7 +184,8 @@ bool OrchDaemon::init()
         CFG_BUFFER_PORT_INGRESS_PROFILE_LIST_NAME,
         CFG_BUFFER_PORT_EGRESS_PROFILE_LIST_NAME
     };
-    gBufferOrch = new BufferOrch(m_configDb, buffer_tables);
+    TableConnector stateDbBufferPGMap(m_stateDb, STATE_BUFFER_PG_MAP_TABLE_NAME);
+    gBufferOrch = new BufferOrch(m_configDb, buffer_tables, stateDbBufferPGMap);
 
     PolicerOrch *policer_orch = new PolicerOrch(m_configDb, "POLICER");
 
@@ -449,6 +468,7 @@ void OrchDaemon::start()
     {
         Selectable *s;
         int ret;
+        static int once_get_map = 0;
 
         ret = m_select->select(&s, SELECT_TIMEOUT);
 
@@ -511,6 +531,53 @@ void OrchDaemon::start()
                     SWSS_LOG_WARN("Orchagent is frozen for warm restart!");
                     sleep(UINT_MAX);
                 }
+            }
+        }
+
+        if (once_get_map == 0)
+        {
+            auto diff = duration_cast<seconds>(steady_clock::now() - g_orchagent_start_time);
+             if(diff.count() > g_orchagent_pending_timeout)
+            {
+                g_get_map_enable = true;
+
+                SWSS_LOG_DEBUG("Begin to get map after 70s");
+                for (auto& pair: gPortsOrch->getAllPorts())
+                {
+                    auto& port = pair.second;
+                    switch (port.m_type)
+                    {
+                    case Port::PHY:
+                        gPortsOrch->storePortMapConfig(port.m_alias, port.m_port_id, true, PORT_MAP);
+                        for (size_t queueIndex = 0; queueIndex < port.m_queue_ids.size(); ++queueIndex)
+                        {
+                            string alias = port.m_alias + "|" + to_string(queueIndex);
+                            sai_object_id_t queue_id;
+
+                            queue_id = port.m_queue_ids[queueIndex];
+
+                            gPortsOrch->storePortMapConfig(alias, queue_id, true, QUEUE_MAP);
+                        }
+                        for (size_t pgIndex = 0; pgIndex < port.m_priority_group_ids.size(); ++pgIndex)
+                        {
+                            string alias = port.m_alias + "|" + to_string(pgIndex);
+                            sai_object_id_t pg_id;
+
+                            pg_id = port.m_priority_group_ids[pgIndex];
+                            gBufferOrch->storePriorityGroupMapConfig(alias, pg_id, true);
+                        }
+                        break;
+                    case Port::LAG:
+                        gPortsOrch->storePortMapConfig(port.m_alias, port.m_lag_id, true, LAG_MAP);
+                        break;
+                    case Port::VLAN:
+                        break;
+                    default:
+                        break;
+                    }
+                }
+
+                once_get_map = 1;
             }
         }
     }

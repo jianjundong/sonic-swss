@@ -31,12 +31,12 @@ const string buffer_profile_list_field_name = "profile_list";
 class BufferOrch : public Orch
 {
 public:
-    BufferOrch(DBConnector *db, vector<string> &tableNames);
+    BufferOrch(DBConnector *db, vector<string> &tableNames, TableConnector stateDbPGConnector);
     bool isPortReady(const std::string& port_name) const;
     static type_map m_buffer_type_maps;
     void generateBufferPoolWatermarkCounterIdList(void);
     const object_map &getBufferPoolNameOidMap(void);
-
+    bool storePriorityGroupMapConfig(string alias, sai_object_id_t id, bool add);
 private:
     typedef task_process_status (BufferOrch::*buffer_table_handler)(Consumer& consumer);
     typedef map<string, buffer_table_handler> buffer_table_handler_map;
@@ -67,6 +67,8 @@ private:
     RedisClient m_countersDbRedisClient;
 
     bool m_isBufferPoolWatermarkCounterIdListGenerated = false;
+	
+    Table m_bufferPGMapCfgTable;
 };
 #endif /* SWSS_BUFFORCH_H */
 

@@ -40,6 +40,9 @@ extern NeighOrch *gNeighOrch;
 extern CrmOrch *gCrmOrch;
 extern BufferOrch *gBufferOrch;
 
+
+extern bool g_get_map_enable;
+
 #define VLAN_PREFIX         "Vlan"
 #define DEFAULT_VLAN_ID     1
 #define MAX_VALID_VLAN_ID   4094
@@ -142,6 +145,14 @@ static char* hostif_vlan_tag[] = {
     [SAI_HOSTIF_VLAN_TAG_KEEP]      = "SAI_HOSTIF_VLAN_TAG_KEEP",
     [SAI_HOSTIF_VLAN_TAG_ORIGINAL]  = "SAI_HOSTIF_VLAN_TAG_ORIGINAL"
 };
+
+enum StoreType
+{
+    PORT_MAP,
+    LAG_MAP,
+    QUEUE_MAP,
+};
+
 /*
  * Initialize PortsOrch
  * 0) By default, a switch has one CPU port, one 802.1Q bridge, and one default
@@ -155,8 +166,11 @@ static char* hostif_vlan_tag[] = {
  *    bridge. By design, SONiC switch starts with all bridge ports removed from
  *    default VLAN and all ports removed from .1Q bridge.
  */
-PortsOrch::PortsOrch(DBConnector *db, vector<table_name_with_pri_t> &tableNames) :
+PortsOrch::PortsOrch(DBConnector *db, vector<table_name_with_pri_t> &tableNames, TableConnector stateDbPortConnector, TableConnector stateDbLagConnector, TableConnector stateDbQueueConnector) :
         Orch(db, tableNames),
+        m_portMapCfgTable(stateDbPortConnector.first, stateDbPortConnector.second),
+        m_lagMapCfgTable(stateDbLagConnector.first, stateDbLagConnector.second),
+        m_queueMapCfgTable(stateDbQueueConnector.first, stateDbQueueConnector.second),
         port_stat_manager(PORT_STAT_COUNTER_FLEX_COUNTER_GROUP, StatsMode::READ, PORT_STAT_FLEX_COUNTER_POLLING_INTERVAL_MS, true),
         queue_stat_manager(QUEUE_STAT_COUNTER_FLEX_COUNTER_GROUP, StatsMode::READ, QUEUE_STAT_FLEX_COUNTER_POLLING_INTERVAL_MS, true)
 {
@@ -1590,6 +1604,25 @@ sai_status_t PortsOrch::removePort(sai_object_id_t port_id)
     m_portCount--;
     SWSS_LOG_NOTICE("Remove port %" PRIx64, port_id);
 
+    /*Remove port mapping from CONFIG_DB*/
+    storePortMapConfig(p.m_alias, port_id, false, PORT_MAP);
+    for (size_t queueIndex = 0; queueIndex < p.m_queue_ids.size(); ++queueIndex)
+    {
+        string alias = p.m_alias + "|" + to_string(queueIndex);
+        sai_object_id_t queue_id;
+
+        queue_id = p.m_queue_ids[queueIndex];
+
+        storePortMapConfig(alias, queue_id, false, QUEUE_MAP);
+    }
+    for (size_t pgIndex = 0; pgIndex < p.m_priority_group_ids.size(); ++pgIndex)
+    {
+        string alias = p.m_alias + "|" + to_string(pgIndex);
+        sai_object_id_t pg_id;
+
+        pg_id = p.m_priority_group_ids[pgIndex];
+        gBufferOrch->storePriorityGroupMapConfig(alias, pg_id, false);
+    }
     return status;
 }
 
@@ -1650,6 +1683,9 @@ bool PortsOrch::initPort(const string &alias, const set<int> &lane_set)
                 m_portList[alias].m_init = true;
 
                 SWSS_LOG_NOTICE("Initialized port %s", alias.c_str());
+
+                /*Store port mapping to CONFIG_DB*/
+                storePortMapConfig(alias, id, true, PORT_MAP);
             }
             else
             {
@@ -2879,6 +2915,16 @@ void PortsOrch::initializeQueues(Port &port)
     }
 
     SWSS_LOG_INFO("Get queues for port %s", port.m_alias.c_str());
+
+    for (size_t queueIndex = 0; queueIndex < port.m_queue_ids.size(); ++queueIndex)
+    {
+        string alias = port.m_alias + "|" + to_string(queueIndex);
+        sai_object_id_t queue_id;
+
+        queue_id = port.m_queue_ids[queueIndex];
+
+        storePortMapConfig(alias, queue_id, true, QUEUE_MAP);
+    }
 }
 
 void PortsOrch::initializePriorityGroups(Port &port)
@@ -3414,6 +3460,8 @@ bool PortsOrch::addLag(string lag_alias)
     vector<FieldValueTuple> fields;
     fields.push_back(tuple);
     m_counterLagTable->set("", fields);
+    /*Store port mapping to CONFIG_DB*/
+    storePortMapConfig(lag_alias, lag_id, true, LAG_MAP);
 
     return true;
 }
@@ -3458,6 +3506,9 @@ bool PortsOrch::removeLag(Port lag)
     notify(SUBJECT_TYPE_PORT_CHANGE, static_cast<void *>(&update));
 
     m_counterLagTable->hdel("", lag.m_alias);
+
+    /*Delete port mapping to CONFIG_DB*/
+    storePortMapConfig(lag.m_alias, 0, false, LAG_MAP);
 
     return true;
 }
@@ -3982,4 +4033,105 @@ void PortsOrch::getPortSerdesVal(const std::string& val_str,
         lane_val = (uint32_t)std::stoul(lane_str, NULL, 16);
         lane_values.push_back(lane_val);
     }
+}
+
+bool PortsOrch::storePortMapConfig(string alias, sai_object_id_t id, bool add, uint32_t storeType)
+{
+    SWSS_LOG_ENTER();
+
+    string key = alias;
+
+    if (g_get_map_enable == false)
+    {
+        return true;
+    }
+
+    if (add)
+    {
+        if (storeType == PORT_MAP)
+        {
+            sai_attribute_t attr[2];
+            attr[0].id = SAI_PORT_ATTR_ASIC_ID;
+            attr[1].id = SAI_PORT_ATTR_RID;
+
+            sai_status_t ret = sai_port_api->get_port_attribute(id, 2, attr);
+            if (ret != SAI_STATUS_SUCCESS)
+            {
+                SWSS_LOG_ERROR("Failed to get port map for %s", alias.c_str());
+                return false;
+            }
+
+            // Write to CFG_DB
+            std::vector<FieldValueTuple> fvs;
+            fvs.push_back(FieldValueTuple("asic_port", to_string(attr[0].value.u32)));
+            fvs.push_back(FieldValueTuple("logical_port", to_string(attr[1].value.u64)));
+            m_portMapCfgTable.set(key, fvs);
+            SWSS_LOG_DEBUG("Set port map %s" , alias.c_str());
+        }
+        else if (storeType == LAG_MAP)
+        {
+            sai_attribute_t attr[2];
+            attr[0].id = SAI_LAG_ATTR_ASIC_ID;
+            attr[1].id = SAI_LAG_ATTR_RID;
+
+            sai_status_t ret = sai_lag_api->get_lag_attribute(id, 2, attr);
+            if (ret != SAI_STATUS_SUCCESS)
+            {
+                SWSS_LOG_ERROR("Failed to get lag map for %s", alias.c_str());
+                return false;
+            }
+
+            // Write to CFG_DB
+            std::vector<FieldValueTuple> fvs;
+            fvs.push_back(FieldValueTuple("asic_lag", to_string(attr[0].value.u32)));
+            fvs.push_back(FieldValueTuple("logical_lag", to_string(attr[1].value.u64)));
+            m_lagMapCfgTable.set(key, fvs);
+            SWSS_LOG_DEBUG("Set lag map %s" , alias.c_str());
+        }
+        else if (storeType == QUEUE_MAP)
+        {
+            sai_attribute_t attr[2];
+            attr[0].id = SAI_QUEUE_ATTR_INDEX;
+            attr[1].id = SAI_QUEUE_ATTR_RID;
+
+            sai_status_t ret = sai_queue_api->get_queue_attribute(id, 2, attr);
+            if (ret != SAI_STATUS_SUCCESS)
+            {
+                SWSS_LOG_ERROR("Failed to get queue map for %s", alias.c_str());
+                return false;
+            }
+
+            // Write to CFG_DB
+            std::vector<FieldValueTuple> fvs;
+            fvs.push_back(FieldValueTuple("asic_queue", to_string(attr[0].value.u8)));
+            fvs.push_back(FieldValueTuple("logical_queue", to_string(attr[1].value.u64)));
+            m_queueMapCfgTable.set(key, fvs);
+            SWSS_LOG_DEBUG("Set queue map %s" , alias.c_str());
+        }
+        else
+        {
+            SWSS_LOG_ERROR("Unknown type");
+            return false;
+        }
+    }
+    else
+    {
+        if (storeType == PORT_MAP)
+        {
+            m_portMapCfgTable.del(key);
+        }
+        else if (storeType == LAG_MAP)
+        {
+            m_lagMapCfgTable.del(key);
+        }
+        else if (storeType == QUEUE_MAP)
+        {
+            m_queueMapCfgTable.del(key);
+        }
+        else
+        {
+        }
+    }
+
+    return true;
 }

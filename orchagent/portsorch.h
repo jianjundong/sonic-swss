@@ -53,7 +53,7 @@ struct VlanMemberUpdate
 class PortsOrch : public Orch, public Subject
 {
 public:
-    PortsOrch(DBConnector *db, vector<table_name_with_pri_t> &tableNames);
+    PortsOrch(DBConnector *db, vector<table_name_with_pri_t> &tableNames, TableConnector stateDbPortConnector, TableConnector stateDbLagConnector, TableConnector stateDbQueueConnector);
 
     bool allPortsReady();
     bool isInitDone();
@@ -106,6 +106,7 @@ public:
 
     bool addSubPort(Port &port, const string &alias, const bool &adminUp = true, const uint32_t &mtu = 0);
     bool removeSubPort(const string &alias);
+    bool storePortMapConfig(string alias, sai_object_id_t id, bool add, uint32_t storeType);
 private:
     unique_ptr<Table> m_counterTable;
     unique_ptr<Table> m_counterLagTable;
@@ -117,6 +118,9 @@ private:
     unique_ptr<Table> m_pgTable;
     unique_ptr<Table> m_pgPortTable;
     unique_ptr<Table> m_pgIndexTable;
+    Table m_portMapCfgTable;
+    Table m_lagMapCfgTable;
+    Table m_queueMapCfgTable;
     unique_ptr<ProducerTable> m_flexCounterTable;
     unique_ptr<ProducerTable> m_flexCounterGroupTable;
 

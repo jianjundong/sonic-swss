@@ -17,6 +17,8 @@ extern sai_buffer_api_t *sai_buffer_api;
 extern PortsOrch *gPortsOrch;
 extern sai_object_id_t gSwitchId;
 
+extern bool g_get_map_enable;
+
 #define BUFFER_POOL_WATERMARK_FLEX_STAT_COUNTER_POLL_MSECS  "10000"
 
 
@@ -34,8 +36,9 @@ type_map BufferOrch::m_buffer_type_maps = {
     {CFG_BUFFER_PORT_EGRESS_PROFILE_LIST_NAME, new object_map()}
 };
 
-BufferOrch::BufferOrch(DBConnector *db, vector<string> &tableNames) :
+BufferOrch::BufferOrch(DBConnector *db, vector<string> &tableNames, TableConnector stateDbPGConnector) :
     Orch(db, tableNames),
+    m_bufferPGMapCfgTable(stateDbPGConnector.first, stateDbPGConnector.second),
     m_flexCounterDb(new DBConnector("FLEX_COUNTER_DB", 0)),
     m_flexCounterTable(new ProducerTable(m_flexCounterDb.get(), FLEX_COUNTER_TABLE)),
     m_flexCounterGroupTable(new ProducerTable(m_flexCounterDb.get(), FLEX_COUNTER_GROUP_TABLE)),
@@ -802,6 +805,45 @@ task_process_status BufferOrch::processEgressBufferProfileList(Consumer &consume
         }
     }
     return task_process_status::task_success;
+}
+
+bool BufferOrch::storePriorityGroupMapConfig(string alias, sai_object_id_t id, bool add)
+{
+    SWSS_LOG_ENTER();
+
+    string key = alias;
+
+    if (g_get_map_enable == false)
+    {
+        return true;
+    }
+
+    if (add)
+    {
+        sai_attribute_t attr[2];
+        attr[0].id = SAI_INGRESS_PRIORITY_GROUP_ATTR_INDEX;
+        attr[1].id = SAI_INGRESS_PRIORITY_GROUP_ATTR_RID;
+
+        sai_status_t ret = sai_buffer_api->get_ingress_priority_group_attribute(id, 2, attr);
+        if (ret != SAI_STATUS_SUCCESS)
+        {
+            SWSS_LOG_ERROR("Failed to get pg map for %s", alias.c_str());
+            return false;
+        }
+
+        // Write to CFG_DB
+        std::vector<FieldValueTuple> fvs;
+        fvs.push_back(FieldValueTuple("asic_pg", to_string(attr[0].value.u8)));
+        fvs.push_back(FieldValueTuple("logical_pg", to_string(attr[1].value.u64)));
+        m_bufferPGMapCfgTable.set(key, fvs);
+        SWSS_LOG_DEBUG("Set Priority Group Map %s", alias.c_str());
+    }
+    else
+    {
+        m_bufferPGMapCfgTable.del(key);
+    }
+
+    return true;
 }
 
 void BufferOrch::doTask()
